@@ -1,0 +1,22 @@
+{
+  "name": "basler-webhooks",
+  "version": "1.0.0",
+  "description": "Webhook handlers for Basler Academy integrations",
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod",
+    "test:config": "node scripts/test-config.js",
+    "test:qb": "node scripts/test-quickbooks.js"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "vercel": "^33.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Basler Academy",
+  "license": "UNLICENSED",
+  "private": true
+}

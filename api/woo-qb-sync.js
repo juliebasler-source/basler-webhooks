@@ -6,16 +6,17 @@
  * - Creates Sales Receipt (if paid via Stripe)
  * - Creates Invoice with NET 30 (if paylater coupon used)
  * 
- * @version 1.1.0
+ * @version 1.2.0
  * @lastUpdated 2024-12-30
+ * 
+ * CHANGELOG v1.2.0:
+ * - Made invoice sending non-fatal (invoice still created if send fails)
+ * - Paylater orders now use full prices for invoicing
  * 
  * CHANGELOG v1.1.0:
  * - Temporarily disabled webhook signature validation for testing
  * - Added order status check (only process "completed" orders)
  * - Improved logging
- * 
- * TODO: Re-enable signature validation with raw body parsing
- * See: https://vercel.com/guides/how-do-i-get-the-raw-body-of-a-serverless-function
  */
 
 import { validateWooCommerceWebhook } from '../lib/validate-webhook.js';
@@ -35,11 +36,6 @@ export default async function handler(req, res) {
   try {
     // =========================================================================
     // Step 1: Validate webhook signature
-    // =========================================================================
-    // TEMPORARILY DISABLED: Vercel parses JSON body automatically, which
-    // changes the payload string and breaks HMAC validation. 
-    // To fix properly, we need to configure Vercel to provide raw body.
-    // For now, we skip validation to test the QuickBooks integration.
     // =========================================================================
     
     const webhookSecret = null; // TEMP: Disabled for testing
@@ -64,9 +60,6 @@ export default async function handler(req, res) {
 
     // =========================================================================
     // Step 2: Check order status (only process completed orders)
-    // =========================================================================
-    // WooCommerce webhook is set to "Order updated" which fires on any change.
-    // We only want to create QB records when the order is actually completed.
     // =========================================================================
     
     const orderStatus = req.body?.status;
@@ -124,20 +117,27 @@ export default async function handler(req, res) {
       console.log('\n📄 CREATING INVOICE (NET 30)...');
       const invoice = await qb.createInvoice(qbCustomer, order);
       console.log(`   Invoice ID: ${invoice.Id}`);
-      console.log(`   Invoice Number: ${invoice.DocNumber}`);
+      console.log(`   Invoice Number: ${invoice.DocNumber || 'auto-assigned'}`);
       console.log(`   Due Date: ${invoice.DueDate}`);
+      console.log(`   Total: $${invoice.TotalAmt}`);
       
-      // Auto-send the invoice to customer
+      // Auto-send the invoice (non-fatal if it fails)
       console.log('\n📧 SENDING INVOICE...');
-      await qb.sendInvoice(invoice.Id);
-      console.log(`   ✓ Invoice sent to ${order.customer.email}`);
+      try {
+        await qb.sendInvoice(invoice.Id);
+        console.log(`   ✓ Invoice sent to ${order.customer.email}`);
+      } catch (sendError) {
+        console.warn(`   ⚠ Could not auto-send invoice: ${sendError.message}`);
+        console.warn(`   → Invoice was created successfully but needs manual sending from QuickBooks`);
+      }
       
     } else {
       // Paid via Stripe = Create Sales Receipt (already paid)
       console.log('\n🧾 CREATING SALES RECEIPT...');
       const receipt = await qb.createSalesReceipt(qbCustomer, order);
       console.log(`   Receipt ID: ${receipt.Id}`);
-      console.log(`   Receipt Number: ${receipt.DocNumber}`);
+      console.log(`   Receipt Number: ${receipt.DocNumber || 'auto-assigned'}`);
+      console.log(`   Total: $${receipt.TotalAmt}`);
     }
 
     // =========================================================================
@@ -156,13 +156,6 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    // =========================================================================
-    // Error handling
-    // =========================================================================
-    // Return 200 to prevent WooCommerce retries - we've received the webhook,
-    // even if processing failed. Log the error for debugging.
-    // =========================================================================
-    
     console.error('\n❌ ERROR:', error.message);
     console.error(error.stack);
 

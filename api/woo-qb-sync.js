@@ -211,8 +211,6 @@ function buildSalesReceiptData(qbCustomer, order) {
     CustomerRef: { value: qbCustomer.Id },
     BillEmail: { Address: order.customer.email },
     PrivateNote: `WooCommerce Order #${order.orderId}`,
-    PaymentMethodRef: { value: '1' }, // Adjust based on your QB setup
-    DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT || '1' },
     Line: order.lineItems.map(item => ({
       Amount: parseFloat(item.total),
       DetailType: 'SalesItemLineDetail',

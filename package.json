@@ -1,22 +1,20 @@
 {
   "name": "basler-webhooks",
-  "version": "1.0.0",
-  "description": "Webhook handlers for Basler Academy integrations",
+  "version": "2.0.0",
+  "description": "Webhook handlers for Basler Academy - WooCommerce and YCBM to QuickBooks",
   "type": "module",
   "scripts": {
     "dev": "vercel dev",
-    "deploy": "vercel --prod",
-    "test:config": "node scripts/test-config.js",
-    "test:qb": "node scripts/test-quickbooks.js"
+    "deploy": "vercel --prod"
   },
-  "dependencies": {},
+  "dependencies": {
+    "node-quickbooks": "^2.0.39",
+    "stripe": "^14.0.0"
+  },
   "devDependencies": {
-    "vercel": "^33.0.0"
+    "vercel": "^37.0.0"
   },
   "engines": {
     "node": ">=18.0.0"
-  },
-  "author": "Basler Academy",
-  "license": "UNLICENSED",
-  "private": true
+  }
 }

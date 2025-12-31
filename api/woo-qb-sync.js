@@ -6,22 +6,26 @@
  * - Creates Sales Receipt (if paid via Stripe)
  * - Creates Invoice with NET 30 (if paylater coupon used)
  * 
- * @version 1.2.0
- * @lastUpdated 2024-12-30
+ * @version 1.3.0
+ * @lastUpdated 2024-12-31
+ * 
+ * CHANGELOG v1.3.0:
+ * - Fixed imports to use function-based QuickBooks API
  * 
  * CHANGELOG v1.2.0:
  * - Made invoice sending non-fatal (invoice still created if send fails)
  * - Paylater orders now use full prices for invoicing
- * 
- * CHANGELOG v1.1.0:
- * - Temporarily disabled webhook signature validation for testing
- * - Added order status check (only process "completed" orders)
- * - Improved logging
  */
 
 import { validateWooCommerceWebhook } from '../lib/validate-webhook.js';
 import { parseWooCommerceOrder } from '../lib/parse-order.js';
-import { QuickBooksClient } from '../lib/quickbooks.js';
+import { 
+  getQBClient, 
+  findOrCreateCustomer, 
+  createSalesReceipt, 
+  createInvoice, 
+  sendInvoice 
+} from '../lib/quickbooks.js';
 
 export default async function handler(req, res) {
   // Only accept POST requests
@@ -96,15 +100,14 @@ export default async function handler(req, res) {
     // Step 4: Initialize QuickBooks client
     // =========================================================================
     
-    const qb = new QuickBooksClient();
-    await qb.initialize();
+    const qb = await getQBClient();
 
     // =========================================================================
     // Step 5: Find or create customer in QuickBooks
     // =========================================================================
     
     console.log('\n👤 PROCESSING CUSTOMER...');
-    const qbCustomer = await qb.findOrCreateCustomer(order.customer);
+    const qbCustomer = await findOrCreateCustomer(qb, order.customer);
     console.log(`   QB Customer ID: ${qbCustomer.Id}`);
     console.log(`   QB Customer Name: ${qbCustomer.DisplayName}`);
 
@@ -115,7 +118,11 @@ export default async function handler(req, res) {
     if (order.isPaylater) {
       // Paylater coupon used = Create Invoice with NET 30 terms
       console.log('\n📄 CREATING INVOICE (NET 30)...');
-      const invoice = await qb.createInvoice(qbCustomer, order);
+      
+      // Build invoice data
+      const invoiceData = buildInvoiceData(qbCustomer, order);
+      const invoice = await createInvoice(qb, invoiceData);
+      
       console.log(`   Invoice ID: ${invoice.Id}`);
       console.log(`   Invoice Number: ${invoice.DocNumber || 'auto-assigned'}`);
       console.log(`   Due Date: ${invoice.DueDate}`);
@@ -123,18 +130,22 @@ export default async function handler(req, res) {
       
       // Auto-send the invoice (non-fatal if it fails)
       console.log('\n📧 SENDING INVOICE...');
-      try {
-        await qb.sendInvoice(invoice.Id);
+      const sendResult = await sendInvoice(qb, invoice.Id, order.customer.email);
+      if (sendResult) {
         console.log(`   ✓ Invoice sent to ${order.customer.email}`);
-      } catch (sendError) {
-        console.warn(`   ⚠ Could not auto-send invoice: ${sendError.message}`);
+      } else {
+        console.warn(`   ⚠ Could not auto-send invoice`);
         console.warn(`   → Invoice was created successfully but needs manual sending from QuickBooks`);
       }
       
     } else {
       // Paid via Stripe = Create Sales Receipt (already paid)
       console.log('\n🧾 CREATING SALES RECEIPT...');
-      const receipt = await qb.createSalesReceipt(qbCustomer, order);
+      
+      // Build receipt data
+      const receiptData = buildSalesReceiptData(qbCustomer, order);
+      const receipt = await createSalesReceipt(qb, receiptData);
+      
       console.log(`   Receipt ID: ${receipt.Id}`);
       console.log(`   Receipt Number: ${receipt.DocNumber || 'auto-assigned'}`);
       console.log(`   Total: $${receipt.TotalAmt}`);
@@ -164,4 +175,53 @@ export default async function handler(req, res) {
       error: error.message 
     });
   }
+}
+
+/**
+ * Build QuickBooks Invoice data structure
+ */
+function buildInvoiceData(qbCustomer, order) {
+  // Calculate due date (NET 30)
+  const dueDate = new Date();
+  dueDate.setDate(dueDate.getDate() + 30);
+  
+  return {
+    CustomerRef: { value: qbCustomer.Id },
+    BillEmail: { Address: order.customer.email },
+    DueDate: dueDate.toISOString().split('T')[0],
+    PrivateNote: `WooCommerce Order #${order.orderId}`,
+    Line: order.lineItems.map(item => ({
+      Amount: parseFloat(item.total),
+      DetailType: 'SalesItemLineDetail',
+      SalesItemLineDetail: {
+        ItemRef: { value: item.qbItemId || process.env.QB_ITEM_BST },
+        Qty: item.quantity,
+        UnitPrice: parseFloat(item.price)
+      },
+      Description: item.name
+    }))
+  };
+}
+
+/**
+ * Build QuickBooks Sales Receipt data structure
+ */
+function buildSalesReceiptData(qbCustomer, order) {
+  return {
+    CustomerRef: { value: qbCustomer.Id },
+    BillEmail: { Address: order.customer.email },
+    PrivateNote: `WooCommerce Order #${order.orderId}`,
+    PaymentMethodRef: { value: '1' }, // Adjust based on your QB setup
+    DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT || '1' },
+    Line: order.lineItems.map(item => ({
+      Amount: parseFloat(item.total),
+      DetailType: 'SalesItemLineDetail',
+      SalesItemLineDetail: {
+        ItemRef: { value: item.qbItemId || process.env.QB_ITEM_BST },
+        Qty: item.quantity,
+        UnitPrice: parseFloat(item.price)
+      },
+      Description: item.name
+    }))
+  };
 }

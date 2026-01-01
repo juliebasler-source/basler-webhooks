@@ -1,9 +1,12 @@
 /**
  * YCBM → QuickBooks Webhook Handler
  * 
- * @version 1.1.0
+ * @version 1.2.0
  * @description Processes YouCanBookMe booking webhooks and creates QuickBooks records
- * @lastUpdated 2025-01-01
+ * @lastUpdated 2026-01-01
+ * 
+ * CHANGELOG v1.2.0:
+ * - Added failed webhook logging to KV for retry capability
  * 
  * CHANGELOG v1.1.0:
  * - Added DepositToAccountRef to Sales Receipts (fixes QB validation error)
@@ -40,6 +43,7 @@ import {
 } from '../lib/quickbooks.js';
 import { findStripePayment } from '../lib/stripe-lookup.js';
 import { parseYCBMPayload } from '../lib/parse-ycbm.js';
+import { logFailedWebhook } from '../lib/failed-webhooks.js';
 
 export default async function handler(req, res) {
   // Only accept POST requests
@@ -188,6 +192,15 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error('\n❌ ERROR:', error.message);
     console.error('Stack:', error.stack);
+
+    // Log to KV for retry (skip if this is already a retry)
+    if (!req.headers['x-retry-webhook']) {
+      await logFailedWebhook('ycbm', req.body, error.message, {
+        bookingRef: req.body?.bookingRef,
+        customer: `${req.body?.firstName} ${req.body?.lastName}`,
+        email: req.body?.email
+      });
+    }
 
     return res.status(500).json({
       status: 'error',

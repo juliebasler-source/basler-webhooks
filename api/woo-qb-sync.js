@@ -6,8 +6,12 @@
  * - Creates Sales Receipt (if paid via Stripe)
  * - Creates Invoice with NET 30 (if paylater coupon used)
  * 
- * @version 1.5.0
+ * @version 1.5.1
  * @lastUpdated 2026-01-01
+ * 
+ * CHANGELOG v1.5.1:
+ * - Updated to use improved sendInvoice with direct API call
+ * - No code changes needed - already passing email to sendInvoice
  * 
  * CHANGELOG v1.5.0:
  * - Added failed webhook logging to KV for retry capability

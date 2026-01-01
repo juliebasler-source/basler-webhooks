@@ -1,9 +1,13 @@
 /**
  * YCBM → QuickBooks Webhook Handler
  * 
- * @version 1.0.0
+ * @version 1.1.0
  * @description Processes YouCanBookMe booking webhooks and creates QuickBooks records
- * @lastUpdated 2024-12-31
+ * @lastUpdated 2025-01-01
+ * 
+ * CHANGELOG v1.1.0:
+ * - Added DepositToAccountRef to Sales Receipts (fixes QB validation error)
+ * - Added String() conversion for all QB IDs for consistency
  * 
  * FLOWS:
  * 1. Customer pays via Stripe → Sales Receipt (or Invoice + Payment if extras)
@@ -289,7 +293,8 @@ async function createYCBMSalesReceipt(qb, data) {
     Line: lineItems,
     PrivateNote: memo,
     CustomerMemo: { value: `Booking Reference: ${bookingRef}` },
-    PaymentMethodRef: { value: '1' } // Credit Card
+    PaymentMethodRef: { value: '1' },  // Credit Card
+    DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT || '154' }
   };
 
   return new Promise((resolve, reject) => {

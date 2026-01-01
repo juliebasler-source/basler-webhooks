@@ -8,6 +8,7 @@
     "deploy": "vercel --prod"
   },
   "dependencies": {
+    "@vercel/kv": "^3.0.0",
     "node-quickbooks": "^2.0.39",
     "stripe": "^14.0.0"
   },

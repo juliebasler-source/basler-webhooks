@@ -1,9 +1,13 @@
 /**
  * YCBM → QuickBooks Webhook Handler
  * 
- * @version 1.2.0
+ * @version 1.3.0
  * @description Processes YouCanBookMe booking webhooks and creates QuickBooks records
  * @lastUpdated 2026-01-01
+ * 
+ * CHANGELOG v1.3.0:
+ * - Added sendInvoice call for paylater bookings (auto-sends invoice to customer)
+ * - Uses updated sendInvoice with direct API call
  * 
  * CHANGELOG v1.2.0:
  * - Added failed webhook logging to KV for retry capability
@@ -14,7 +18,7 @@
  * 
  * FLOWS:
  * 1. Customer pays via Stripe → Sales Receipt (or Invoice + Payment if extras)
- * 2. Customer uses paylater coupon → Invoice for full amount (NET 30)
+ * 2. Customer uses paylater coupon → Invoice for full amount (NET 30) + auto-send
  * 
  * WEBHOOK PAYLOAD (from YCBM):
  * {
@@ -39,7 +43,8 @@ import {
   createSalesReceipt, 
   createInvoice,
   createPayment,
-  getItemPrice
+  getItemPrice,
+  sendInvoice
 } from '../lib/quickbooks.js';
 import { findStripePayment } from '../lib/stripe-lookup.js';
 import { parseYCBMPayload } from '../lib/parse-ycbm.js';
@@ -132,6 +137,16 @@ export default async function handler(req, res) {
       console.log(`   Amount: $${result.TotalAmt}`);
       console.log(`   Due Date: ${result.DueDate}`);
 
+      // Auto-send the invoice (non-fatal if it fails)
+      console.log('\n📧 SENDING INVOICE...');
+      const sendResult = await sendInvoice(qb, result.Id, booking.email);
+      if (sendResult) {
+        console.log(`   ✅ Invoice sent to ${booking.email}`);
+      } else {
+        console.warn(`   ⚠ Could not auto-send invoice`);
+        console.warn(`   → Invoice was created successfully but needs manual sending from QuickBooks`);
+      }
+
     } else if (booking.additionalTeamMembers > 0 && stripePayment.amount < totalDue) {
       // FLOW: Partial payment - Paid base, owes for extras
       console.log('\n📝 FLOW: PARTIAL PAYMENT');
@@ -156,6 +171,18 @@ export default async function handler(req, res) {
       console.log(`   ✅ Invoice created: #${result.invoice.DocNumber}`);
       console.log(`   ✅ Payment applied: $${stripePayment.amount}`);
       console.log(`   Balance due: $${result.invoice.Balance}`);
+
+      // Auto-send the invoice for remaining balance (non-fatal if it fails)
+      if (result.invoice.Balance > 0) {
+        console.log('\n📧 SENDING INVOICE FOR REMAINING BALANCE...');
+        const sendResult = await sendInvoice(qb, result.invoice.Id, booking.email);
+        if (sendResult) {
+          console.log(`   ✅ Invoice sent to ${booking.email}`);
+        } else {
+          console.warn(`   ⚠ Could not auto-send invoice`);
+          console.warn(`   → Invoice was created successfully but needs manual sending from QuickBooks`);
+        }
+      }
 
     } else {
       // FLOW: Full payment - Create Sales Receipt
@@ -249,6 +276,7 @@ async function createYCBMInvoice(qb, data) {
 
   const invoiceData = {
     CustomerRef: { value: String(customer.Id) },
+    BillEmail: { Address: customer.PrimaryEmailAddr?.Address },
     Line: lineItems,
     DueDate: dueDate.toISOString().split('T')[0],
     PrivateNote: memo,

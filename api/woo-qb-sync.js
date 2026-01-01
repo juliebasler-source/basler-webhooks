@@ -6,8 +6,14 @@
  * - Creates Sales Receipt (if paid via Stripe)
  * - Creates Invoice with NET 30 (if paylater coupon used)
  * 
- * @version 1.3.0
- * @lastUpdated 2024-12-31
+ * @version 1.4.0
+ * @lastUpdated 2025-01-01
+ * 
+ * CHANGELOG v1.4.0:
+ * - Added DepositToAccountRef to Sales Receipts (fixes QB validation error)
+ * - Fixed item.price → item.unitPrice field reference
+ * - Added String() conversion for all QB IDs
+ * - Added PaymentMethodRef for credit card payments
  * 
  * CHANGELOG v1.3.0:
  * - Fixed imports to use function-based QuickBooks API
@@ -93,7 +99,7 @@ export default async function handler(req, res) {
     console.log(`   Line Items: ${order.lineItems.length}`);
     
     order.lineItems.forEach((item, i) => {
-      console.log(`     ${i + 1}. ${item.name} x${item.quantity} = $${item.total}`);
+      console.log(`     ${i + 1}. ${item.name} x${item.quantity} @ $${item.unitPrice} = $${item.total}`);
     });
 
     // =========================================================================
@@ -179,6 +185,7 @@ export default async function handler(req, res) {
 
 /**
  * Build QuickBooks Invoice data structure
+ * Used for paylater orders (NET 30 terms)
  */
 function buildInvoiceData(qbCustomer, order) {
   // Calculate due date (NET 30)
@@ -186,7 +193,7 @@ function buildInvoiceData(qbCustomer, order) {
   dueDate.setDate(dueDate.getDate() + 30);
   
   return {
-    CustomerRef: { value: qbCustomer.Id },
+    CustomerRef: { value: String(qbCustomer.Id) },
     BillEmail: { Address: order.customer.email },
     DueDate: dueDate.toISOString().split('T')[0],
     PrivateNote: `WooCommerce Order #${order.orderId}`,
@@ -194,9 +201,9 @@ function buildInvoiceData(qbCustomer, order) {
       Amount: parseFloat(item.total),
       DetailType: 'SalesItemLineDetail',
       SalesItemLineDetail: {
-        ItemRef: { value: item.qbItemId || process.env.QB_ITEM_BST },
+        ItemRef: { value: String(item.qbItemId || process.env.QB_ITEM_BST) },
         Qty: item.quantity,
-        UnitPrice: parseFloat(item.price)
+        UnitPrice: parseFloat(item.unitPrice)
       },
       Description: item.name
     }))
@@ -205,19 +212,22 @@ function buildInvoiceData(qbCustomer, order) {
 
 /**
  * Build QuickBooks Sales Receipt data structure
+ * Used for paid orders (Stripe payment completed)
  */
 function buildSalesReceiptData(qbCustomer, order) {
   return {
-    CustomerRef: { value: qbCustomer.Id },
+    CustomerRef: { value: String(qbCustomer.Id) },
     BillEmail: { Address: order.customer.email },
     PrivateNote: `WooCommerce Order #${order.orderId}`,
+    PaymentMethodRef: { value: '1' },  // Credit Card
+    DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT || '154' },
     Line: order.lineItems.map(item => ({
       Amount: parseFloat(item.total),
       DetailType: 'SalesItemLineDetail',
       SalesItemLineDetail: {
-        ItemRef: { value: item.qbItemId || process.env.QB_ITEM_BST },
+        ItemRef: { value: String(item.qbItemId || process.env.QB_ITEM_BST) },
         Qty: item.quantity,
-        UnitPrice: parseFloat(item.price)
+        UnitPrice: parseFloat(item.unitPrice)
       },
       Description: item.name
     }))

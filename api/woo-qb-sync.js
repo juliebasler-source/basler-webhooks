@@ -6,8 +6,11 @@
  * - Creates Sales Receipt (if paid via Stripe)
  * - Creates Invoice with NET 30 (if paylater coupon used)
  * 
- * @version 1.4.0
- * @lastUpdated 2025-01-01
+ * @version 1.5.0
+ * @lastUpdated 2026-01-01
+ * 
+ * CHANGELOG v1.5.0:
+ * - Added failed webhook logging to KV for retry capability
  * 
  * CHANGELOG v1.4.0:
  * - Added DepositToAccountRef to Sales Receipts (fixes QB validation error)
@@ -32,6 +35,7 @@ import {
   createInvoice, 
   sendInvoice 
 } from '../lib/quickbooks.js';
+import { logFailedWebhook } from '../lib/failed-webhooks.js';
 
 export default async function handler(req, res) {
   // Only accept POST requests
@@ -174,9 +178,19 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error('\n❌ ERROR:', error.message);
-    console.error(error.stack);
+    console.error('Stack:', error.stack);
 
-    return res.status(200).json({ 
+    // Log to KV for retry (skip if this is already a retry)
+    if (!req.headers['x-retry-webhook']) {
+      await logFailedWebhook('woocommerce', req.body, error.message, {
+        orderId: req.body?.id,
+        customer: `${req.body?.billing?.first_name} ${req.body?.billing?.last_name}`,
+        email: req.body?.billing?.email,
+        total: req.body?.total
+      });
+    }
+
+    return res.status(500).json({ 
       success: false, 
       error: error.message 
     });

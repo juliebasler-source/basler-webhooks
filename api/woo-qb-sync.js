@@ -5,9 +5,16 @@
  * - Creates/finds customer in QuickBooks
  * - Creates Sales Receipt (if paid via Stripe)
  * - Creates Invoice with NET 30 (if paylater coupon used)
+ * - Adds discount line item when coupon used
  * 
- * @version 1.5.1
- * @lastUpdated 2026-01-01
+ * @version 1.6.0
+ * @lastUpdated 2026-01-02
+ * 
+ * CHANGELOG v1.6.0:
+ * - Added discount line item support for coupon orders
+ * - Sales Receipts now show: Original prices + Discount line = Total paid
+ * - Uses QB_ITEM_DISCOUNT env var for discount line item
+ * - Improved logging for discount scenarios
  * 
  * CHANGELOG v1.5.1:
  * - Updated to use improved sendInvoice with direct API call
@@ -102,10 +109,17 @@ export default async function handler(req, res) {
     console.log(`   Order ID: ${order.orderId}`);
     console.log(`   Customer: ${order.customer.displayName}`);
     console.log(`   Email: ${order.customer.email}`);
+    console.log(`   Subtotal: $${order.subtotal}`);
     console.log(`   Total: $${order.total}`);
     console.log(`   Is Paylater: ${order.isPaylater}`);
-    console.log(`   Line Items: ${order.lineItems.length}`);
+    console.log(`   Has Discount: ${order.discount.hasDiscount}`);
     
+    if (order.discount.hasDiscount) {
+      console.log(`   Discount Code: ${order.discount.code}`);
+      console.log(`   Discount Amount: $${order.discount.amount}`);
+    }
+    
+    console.log(`   Line Items: ${order.lineItems.length}`);
     order.lineItems.forEach((item, i) => {
       console.log(`     ${i + 1}. ${item.name} x${item.quantity} @ $${item.unitPrice} = $${item.total}`);
     });
@@ -133,7 +147,7 @@ export default async function handler(req, res) {
       // Paylater coupon used = Create Invoice with NET 30 terms
       console.log('\n📄 CREATING INVOICE (NET 30)...');
       
-      // Build invoice data
+      // Build invoice data (paylater = full price, no discount shown)
       const invoiceData = buildInvoiceData(qbCustomer, order);
       const invoice = await createInvoice(qb, invoiceData);
       
@@ -156,8 +170,18 @@ export default async function handler(req, res) {
       // Paid via Stripe = Create Sales Receipt (already paid)
       console.log('\n🧾 CREATING SALES RECEIPT...');
       
-      // Build receipt data
+      // Build receipt data (may include discount line)
       const receiptData = buildSalesReceiptData(qbCustomer, order);
+      
+      // Log what we're sending
+      console.log(`   Line items: ${receiptData.Line.length}`);
+      receiptData.Line.forEach((line, i) => {
+        if (line.DetailType === 'SalesItemLineDetail') {
+          const isDiscount = line.Amount < 0;
+          console.log(`     ${i + 1}. ${line.Description}: ${isDiscount ? '-' : ''}$${Math.abs(line.Amount)}`);
+        }
+      });
+      
       const receipt = await createSalesReceipt(qb, receiptData);
       
       console.log(`   Receipt ID: ${receipt.Id}`);
@@ -177,6 +201,7 @@ export default async function handler(req, res) {
       success: true,
       orderId: order.orderId,
       isPaylater: order.isPaylater,
+      hasDiscount: order.discount.hasDiscount,
       customerId: qbCustomer.Id
     });
 
@@ -204,6 +229,7 @@ export default async function handler(req, res) {
 /**
  * Build QuickBooks Invoice data structure
  * Used for paylater orders (NET 30 terms)
+ * NOTE: Paylater invoices show FULL price, no discount
  */
 function buildInvoiceData(qbCustomer, order) {
   // Calculate due date (NET 30)
@@ -231,23 +257,56 @@ function buildInvoiceData(qbCustomer, order) {
 /**
  * Build QuickBooks Sales Receipt data structure
  * Used for paid orders (Stripe payment completed)
+ * 
+ * If a discount coupon was used:
+ * - Line items show ORIGINAL prices (before discount)
+ * - A discount line shows the discount amount as negative
+ * - Total = Original prices - Discount = What Stripe charged
  */
 function buildSalesReceiptData(qbCustomer, order) {
+  // Build product line items (always at original prices)
+  const productLines = order.lineItems.map(item => ({
+    Amount: parseFloat(item.total),
+    DetailType: 'SalesItemLineDetail',
+    SalesItemLineDetail: {
+      ItemRef: { value: String(item.qbItemId || process.env.QB_ITEM_BST) },
+      Qty: item.quantity,
+      UnitPrice: parseFloat(item.unitPrice)
+    },
+    Description: item.name
+  }));
+
+  // Add discount line if applicable
+  let discountLine = null;
+  if (order.discount.hasDiscount && order.discount.amount > 0) {
+    const discountItemId = process.env.QB_ITEM_DISCOUNT;
+    
+    if (!discountItemId) {
+      console.warn('   ⚠ QB_ITEM_DISCOUNT not configured - discount will not be shown as separate line');
+      console.warn('   → Set QB_ITEM_DISCOUNT env var to your QuickBooks discount item ID');
+    } else {
+      discountLine = {
+        Amount: -Math.abs(parseFloat(order.discount.amount)), // Negative amount
+        DetailType: 'SalesItemLineDetail',
+        SalesItemLineDetail: {
+          ItemRef: { value: String(discountItemId) },
+          Qty: 1,
+          UnitPrice: -Math.abs(parseFloat(order.discount.amount)) // Negative unit price
+        },
+        Description: `Discount (${order.discount.code.toUpperCase()})`
+      };
+    }
+  }
+
+  // Combine lines
+  const allLines = discountLine ? [...productLines, discountLine] : productLines;
+
   return {
     CustomerRef: { value: String(qbCustomer.Id) },
     BillEmail: { Address: order.customer.email },
     PrivateNote: `WooCommerce Order #${order.orderId}`,
     PaymentMethodRef: { value: '1' },  // Credit Card
     DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT || '154' },
-    Line: order.lineItems.map(item => ({
-      Amount: parseFloat(item.total),
-      DetailType: 'SalesItemLineDetail',
-      SalesItemLineDetail: {
-        ItemRef: { value: String(item.qbItemId || process.env.QB_ITEM_BST) },
-        Qty: item.quantity,
-        UnitPrice: parseFloat(item.unitPrice)
-      },
-      Description: item.name
-    }))
+    Line: allLines
   };
 }

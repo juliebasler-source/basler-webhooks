@@ -1,9 +1,12 @@
 /**
  * YCBM → QuickBooks Integration
  * 
- * @version 2.1.0
+ * @version 2.1.1
  * @description Handle YouCanBookMe webhooks and create QuickBooks records
  * @lastUpdated 2025-01-02
+ * 
+ * CHANGELOG v2.1.1:
+ * - Fixed DocNumber undefined in logs (fallback to Invoice ID)
  * 
  * CHANGELOG v2.1.0:
  * - Fixed PARTIAL_PAYMENT: creates ONE Invoice + applies Payment (not two records)
@@ -196,7 +199,8 @@ async function handlePaylater(qb, customer, booking, bstPrice, addPrice) {
   };
   
   const invoice = await createInvoice(qb, invoiceData);
-  console.log(`   ✓ Invoice created: #${invoice.DocNumber}`);
+  const docNum = invoice.DocNumber || `ID:${invoice.Id}`;
+  console.log(`   ✓ Invoice created: #${docNum}`);
   
   // Send the invoice
   let invoiceSent = false;
@@ -212,7 +216,7 @@ async function handlePaylater(qb, customer, booking, bstPrice, addPrice) {
   
   return {
     type: 'Invoice',
-    docNumber: invoice.DocNumber,
+    docNumber: docNum,
     invoiceId: invoice.Id,
     total: invoice.TotalAmt,
     invoiceSent
@@ -249,11 +253,12 @@ async function handleSimplePaid(qb, customer, booking, stripePayment) {
   };
   
   const receipt = await createSalesReceipt(qb, receiptData);
-  console.log(`   ✓ Sales Receipt created: #${receipt.DocNumber}`);
+  const docNum = receipt.DocNumber || `ID:${receipt.Id}`;
+  console.log(`   ✓ Sales Receipt created: #${docNum}`);
   
   return {
     type: 'SalesReceipt',
-    docNumber: receipt.DocNumber,
+    docNumber: docNum,
     total: receipt.TotalAmt
   };
 }
@@ -304,12 +309,13 @@ async function handlePaidWithDiscount(qb, customer, booking, stripePayment) {
   };
   
   const receipt = await createSalesReceipt(qb, receiptData);
-  console.log(`   ✓ Sales Receipt created: #${receipt.DocNumber}`);
+  const docNum = receipt.DocNumber || `ID:${receipt.Id}`;
+  console.log(`   ✓ Sales Receipt created: #${docNum}`);
   console.log(`   ✓ Discount applied: -$${discountAmount.toFixed(2)} (${couponCode})`);
   
   return {
     type: 'SalesReceipt',
-    docNumber: receipt.DocNumber,
+    docNumber: docNum,
     total: receipt.TotalAmt,
     discountApplied: discountAmount,
     couponCode
@@ -432,7 +438,8 @@ async function handlePartialPayment(qb, customer, booking, stripePayment, bstPri
   };
   
   const invoice = await createInvoice(qb, invoiceData);
-  console.log(`   ✓ Invoice created: #${invoice.DocNumber} (Total: $${invoice.TotalAmt})`);
+  const docNum = invoice.DocNumber || `ID:${invoice.Id}`;
+  console.log(`   ✓ Invoice created: #${docNum} (Total: $${invoice.TotalAmt})`);
   
   // Apply the Stripe payment against the invoice
   const paymentData = {
@@ -467,7 +474,7 @@ async function handlePartialPayment(qb, customer, booking, stripePayment, bstPri
   
   return {
     type: 'Invoice+Payment',
-    docNumber: invoice.DocNumber,
+    docNumber: docNum,
     invoiceId: invoice.Id,
     invoiceTotal: invoice.TotalAmt,
     paymentId: payment.Id,

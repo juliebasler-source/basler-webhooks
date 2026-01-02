@@ -21,14 +21,16 @@
 import { parseYCBMPayload } from '../lib/parse-ycbm.js';
 import { findPaymentByEmail, centsToDollars } from '../lib/stripe-lookup.js';
 import { 
-  getAccessToken, 
+  getQBClient, 
   findOrCreateCustomer, 
-  getItemPrice,
   createSalesReceipt,
   createInvoice,
-  createPayment,
   sendInvoice
 } from '../lib/quickbooks.js';
+
+// Default prices (used for paylater when no Stripe data)
+const DEFAULT_BST_PRICE = 1750;
+const DEFAULT_ADD_PRICE = 99;
 
 export default async function handler(req, res) {
   // Only accept POST
@@ -57,21 +59,20 @@ export default async function handler(req, res) {
     console.log(`📋 Booking Ref: ${booking.bookingRef}`);
     console.log(`👥 Additional Team Members: ${booking.additionalTeamMembers}`);
     
-    // Get QuickBooks access token
-    const accessToken = await getAccessToken();
-    const realmId = process.env.QB_REALM_ID;
+    // Get QuickBooks client
+    const qb = await getQBClient();
     
     // Find or create customer in QuickBooks
-    const customer = await findOrCreateCustomer(accessToken, realmId, {
-      name: booking.fullName,
+    const customer = await findOrCreateCustomer(qb, {
+      displayName: booking.fullName,
       email: booking.email
     });
     console.log(`\n✓ QB Customer: ${customer.DisplayName} (ID: ${customer.Id})`);
     
-    // Get QB item prices
-    const bstPrice = await getItemPrice(accessToken, realmId, process.env.QB_ITEM_BST);
-    const addPrice = await getItemPrice(accessToken, realmId, process.env.QB_ITEM_ADD);
-    console.log(`\n💰 QB Prices: Base=$${bstPrice}, Additional=$${addPrice}`);
+    // Use default prices (or could fetch from QB if needed)
+    const bstPrice = DEFAULT_BST_PRICE;
+    const addPrice = DEFAULT_ADD_PRICE;
+    console.log(`\n💰 Prices: Base=$${bstPrice}, Additional=$${addPrice}`);
     
     // Search Stripe for payment (extended to 60 min for testing)
     const stripePayment = await findPaymentByEmail(booking.email, 60);
@@ -94,25 +95,29 @@ export default async function handler(req, res) {
     
     switch (flow) {
       case 'PAYLATER':
-        result = await handlePaylater(accessToken, realmId, customer, booking, bstPrice, addPrice);
+        result = await handlePaylater(qb, customer, booking, bstPrice, addPrice);
         break;
         
       case 'SIMPLE_PAID':
-        result = await handleSimplePaid(accessToken, realmId, customer, booking, stripePayment);
+        result = await handleSimplePaid(qb, customer, booking, stripePayment);
         break;
         
       case 'PAID_WITH_DISCOUNT':
-        result = await handlePaidWithDiscount(accessToken, realmId, customer, booking, stripePayment);
+        result = await handlePaidWithDiscount(qb, customer, booking, stripePayment);
         break;
         
       case 'PARTIAL_PAYMENT':
-        result = await handlePartialPayment(accessToken, realmId, customer, booking, stripePayment, bstPrice, addPrice);
+        result = await handlePartialPayment(qb, customer, booking, stripePayment, bstPrice, addPrice);
         break;
     }
     
     console.log(`\n${'═'.repeat(60)}`);
     console.log(`✅ SUCCESS - ${flow}`);
-    console.log(`   QB Record: ${result.type} #${result.docNumber}`);
+    if (result.docNumber) {
+      console.log(`   QB Record: ${result.type} #${result.docNumber}`);
+    } else if (result.receiptDocNumber) {
+      console.log(`   QB Records: Receipt #${result.receiptDocNumber} + Invoice #${result.invoiceDocNumber}`);
+    }
     if (result.invoiceSent) console.log(`   📧 Invoice sent to customer`);
     console.log('═'.repeat(60));
     
@@ -137,7 +142,7 @@ export default async function handler(req, res) {
  * Flow 1: PAYLATER - No Stripe payment found
  * Create invoice for full amount at QB prices
  */
-async function handlePaylater(accessToken, realmId, customer, booking, bstPrice, addPrice) {
+async function handlePaylater(qb, customer, booking, bstPrice, addPrice) {
   console.log('\n📋 Creating PAYLATER Invoice (full amount)...');
   
   const lines = [];
@@ -147,7 +152,7 @@ async function handlePaylater(accessToken, realmId, customer, booking, bstPrice,
     Amount: bstPrice,
     DetailType: 'SalesItemLineDetail',
     SalesItemLineDetail: {
-      ItemRef: { value: process.env.QB_ITEM_BST },
+      ItemRef: { value: String(process.env.QB_ITEM_BST) },
       Qty: 1,
       UnitPrice: bstPrice
     },
@@ -161,7 +166,7 @@ async function handlePaylater(accessToken, realmId, customer, booking, bstPrice,
       Amount: extrasTotal,
       DetailType: 'SalesItemLineDetail',
       SalesItemLineDetail: {
-        ItemRef: { value: process.env.QB_ITEM_ADD },
+        ItemRef: { value: String(process.env.QB_ITEM_ADD) },
         Qty: booking.additionalTeamMembers,
         UnitPrice: addPrice
       },
@@ -174,22 +179,24 @@ async function handlePaylater(accessToken, realmId, customer, booking, bstPrice,
   dueDate.setDate(dueDate.getDate() + 30);
   
   const invoiceData = {
-    CustomerRef: { value: customer.Id },
+    CustomerRef: { value: String(customer.Id) },
+    BillEmail: { Address: booking.email },
     Line: lines,
     DueDate: dueDate.toISOString().split('T')[0],
-    CustomerMemo: { value: `Booking ref: ${booking.bookingRef} - Thank you for your booking!` },
     PrivateNote: `YCBM Booking: ${booking.bookingRef}`
   };
   
-  const invoice = await createInvoice(accessToken, realmId, invoiceData);
+  const invoice = await createInvoice(qb, invoiceData);
   console.log(`   ✓ Invoice created: #${invoice.DocNumber}`);
   
   // Send the invoice
   let invoiceSent = false;
   try {
-    await sendInvoice(accessToken, realmId, invoice.Id, booking.email);
-    invoiceSent = true;
-    console.log(`   ✓ Invoice sent to ${booking.email}`);
+    const sendResult = await sendInvoice(qb, invoice.Id, booking.email);
+    if (sendResult) {
+      invoiceSent = true;
+      console.log(`   ✓ Invoice sent to ${booking.email}`);
+    }
   } catch (e) {
     console.log(`   ⚠️ Could not send invoice: ${e.message}`);
   }
@@ -207,7 +214,7 @@ async function handlePaylater(accessToken, realmId, customer, booking, bstPrice,
  * Flow 2: SIMPLE_PAID - Stripe payment, no extras, no discount
  * Create Sales Receipt for amount paid
  */
-async function handleSimplePaid(accessToken, realmId, customer, booking, stripePayment) {
+async function handleSimplePaid(qb, customer, booking, stripePayment) {
   console.log('\n🧾 Creating Sales Receipt (simple paid)...');
   
   const amountPaid = centsToDollars(stripePayment.amountPaid);
@@ -216,7 +223,7 @@ async function handleSimplePaid(accessToken, realmId, customer, booking, stripeP
     Amount: amountPaid,
     DetailType: 'SalesItemLineDetail',
     SalesItemLineDetail: {
-      ItemRef: { value: process.env.QB_ITEM_BST },
+      ItemRef: { value: String(process.env.QB_ITEM_BST) },
       Qty: 1,
       UnitPrice: amountPaid
     },
@@ -224,13 +231,15 @@ async function handleSimplePaid(accessToken, realmId, customer, booking, stripeP
   }];
   
   const receiptData = {
-    CustomerRef: { value: customer.Id },
+    CustomerRef: { value: String(customer.Id) },
+    BillEmail: { Address: booking.email },
     Line: lines,
     PrivateNote: `YCBM Booking: ${booking.bookingRef}`,
-    DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT }
+    PaymentMethodRef: { value: '1' },
+    DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT || '154' }
   };
   
-  const receipt = await createSalesReceipt(accessToken, realmId, receiptData);
+  const receipt = await createSalesReceipt(qb, receiptData);
   console.log(`   ✓ Sales Receipt created: #${receipt.DocNumber}`);
   
   return {
@@ -244,7 +253,7 @@ async function handleSimplePaid(accessToken, realmId, customer, booking, stripeP
  * Flow 3: PAID_WITH_DISCOUNT - Stripe payment with discount, no extras
  * Create Sales Receipt with discount line item
  */
-async function handlePaidWithDiscount(accessToken, realmId, customer, booking, stripePayment) {
+async function handlePaidWithDiscount(qb, customer, booking, stripePayment) {
   console.log('\n🧾 Creating Sales Receipt (with discount)...');
   
   const subtotal = centsToDollars(stripePayment.subtotal);
@@ -257,7 +266,7 @@ async function handlePaidWithDiscount(accessToken, realmId, customer, booking, s
       Amount: subtotal,
       DetailType: 'SalesItemLineDetail',
       SalesItemLineDetail: {
-        ItemRef: { value: process.env.QB_ITEM_BST },
+        ItemRef: { value: String(process.env.QB_ITEM_BST) },
         Qty: 1,
         UnitPrice: subtotal
       },
@@ -268,7 +277,7 @@ async function handlePaidWithDiscount(accessToken, realmId, customer, booking, s
       Amount: -discountAmount,
       DetailType: 'SalesItemLineDetail',
       SalesItemLineDetail: {
-        ItemRef: { value: process.env.QB_ITEM_DISCOUNT },
+        ItemRef: { value: String(process.env.QB_ITEM_DISCOUNT) },
         Qty: 1,
         UnitPrice: -discountAmount
       },
@@ -277,13 +286,15 @@ async function handlePaidWithDiscount(accessToken, realmId, customer, booking, s
   ];
   
   const receiptData = {
-    CustomerRef: { value: customer.Id },
+    CustomerRef: { value: String(customer.Id) },
+    BillEmail: { Address: booking.email },
     Line: lines,
     PrivateNote: `YCBM Booking: ${booking.bookingRef} | Coupon: ${couponCode}`,
-    DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT }
+    PaymentMethodRef: { value: '1' },
+    DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT || '154' }
   };
   
-  const receipt = await createSalesReceipt(accessToken, realmId, receiptData);
+  const receipt = await createSalesReceipt(qb, receiptData);
   console.log(`   ✓ Sales Receipt created: #${receipt.DocNumber}`);
   console.log(`   ✓ Discount applied: -$${discountAmount.toFixed(2)} (${couponCode})`);
   
@@ -298,44 +309,16 @@ async function handlePaidWithDiscount(accessToken, realmId, customer, booking, s
 
 /**
  * Flow 4: PARTIAL_PAYMENT - Stripe payment + extras (balance due)
- * Create Invoice with all lines, apply Payment for Stripe amount
+ * Create Sales Receipt for Stripe payment, Invoice for extras balance
  */
-async function handlePartialPayment(accessToken, realmId, customer, booking, stripePayment, bstPrice, addPrice) {
-  console.log('\n📋 Creating Invoice with Payment (partial)...');
+async function handlePartialPayment(qb, customer, booking, stripePayment, bstPrice, addPrice) {
+  console.log('\n📋 Creating Sales Receipt + Invoice (partial payment)...');
   
-  const lines = [];
-  
-  // Use Stripe subtotal as base price (what they saw at checkout)
-  const basePrice = centsToDollars(stripePayment.subtotal);
+  // Calculate amounts
+  const subtotal = centsToDollars(stripePayment.subtotal);
   const discountAmount = centsToDollars(stripePayment.discountAmount);
   const amountPaid = centsToDollars(stripePayment.amountPaid);
   const couponCode = stripePayment.couponCode || 'Discount';
-  
-  // Line 1: Building Strong Teams
-  lines.push({
-    Amount: basePrice,
-    DetailType: 'SalesItemLineDetail',
-    SalesItemLineDetail: {
-      ItemRef: { value: process.env.QB_ITEM_BST },
-      Qty: 1,
-      UnitPrice: basePrice
-    },
-    Description: 'Building Strong Teams'
-  });
-  
-  // Line 2: Discount on base (if any)
-  if (discountAmount > 0) {
-    lines.push({
-      Amount: -discountAmount,
-      DetailType: 'SalesItemLineDetail',
-      SalesItemLineDetail: {
-        ItemRef: { value: process.env.QB_ITEM_DISCOUNT },
-        Qty: 1,
-        UnitPrice: -discountAmount
-      },
-      Description: `Discount (${couponCode})`
-    });
-  }
   
   // Calculate extras pricing
   let extrasTotal = booking.additionalTeamMembers * addPrice;
@@ -347,32 +330,74 @@ async function handlePartialPayment(accessToken, realmId, customer, booking, str
     extrasDiscount = Math.round(extrasDiscount * 100) / 100; // Round to cents
   }
   
-  // Line 3: Additional Team Members
-  if (booking.additionalTeamMembers > 0) {
-    lines.push({
+  const extrasBalance = extrasTotal - extrasDiscount;
+  
+  // ===== Part 1: Sales Receipt for Stripe payment =====
+  const receiptLines = [
+    {
+      Amount: subtotal,
+      DetailType: 'SalesItemLineDetail',
+      SalesItemLineDetail: {
+        ItemRef: { value: String(process.env.QB_ITEM_BST) },
+        Qty: 1,
+        UnitPrice: subtotal
+      },
+      Description: 'Building Strong Teams'
+    }
+  ];
+  
+  // Add discount line if applicable
+  if (discountAmount > 0) {
+    receiptLines.push({
+      Amount: -discountAmount,
+      DetailType: 'SalesItemLineDetail',
+      SalesItemLineDetail: {
+        ItemRef: { value: String(process.env.QB_ITEM_DISCOUNT) },
+        Qty: 1,
+        UnitPrice: -discountAmount
+      },
+      Description: `Discount (${couponCode})`
+    });
+  }
+  
+  const receiptData = {
+    CustomerRef: { value: String(customer.Id) },
+    BillEmail: { Address: booking.email },
+    Line: receiptLines,
+    PrivateNote: `YCBM Booking: ${booking.bookingRef} | Stripe payment for base`,
+    PaymentMethodRef: { value: '1' },
+    DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT || '154' }
+  };
+  
+  const receipt = await createSalesReceipt(qb, receiptData);
+  console.log(`   ✓ Sales Receipt created: #${receipt.DocNumber} ($${amountPaid.toFixed(2)})`);
+  
+  // ===== Part 2: Invoice for extras balance =====
+  const invoiceLines = [
+    {
       Amount: extrasTotal,
       DetailType: 'SalesItemLineDetail',
       SalesItemLineDetail: {
-        ItemRef: { value: process.env.QB_ITEM_ADD },
+        ItemRef: { value: String(process.env.QB_ITEM_ADD) },
         Qty: booking.additionalTeamMembers,
         UnitPrice: addPrice
       },
       Description: `Additional Team Members (${booking.additionalTeamMembers})`
-    });
-    
-    // Line 4: Discount on extras (if percentage discount)
-    if (extrasDiscount > 0) {
-      lines.push({
-        Amount: -extrasDiscount,
-        DetailType: 'SalesItemLineDetail',
-        SalesItemLineDetail: {
-          ItemRef: { value: process.env.QB_ITEM_DISCOUNT },
-          Qty: 1,
-          UnitPrice: -extrasDiscount
-        },
-        Description: `Discount on extras (${stripePayment.percentOff}% off)`
-      });
     }
+  ];
+  
+  // Add extras discount line if percentage discount
+  if (extrasDiscount > 0) {
+    invoiceLines.push({
+      Amount: -extrasDiscount,
+      DetailType: 'SalesItemLineDetail',
+      SalesItemLineDetail: {
+        ItemRef: { value: String(process.env.QB_ITEM_DISCOUNT) },
+        Qty: 1,
+        UnitPrice: -extrasDiscount
+      },
+      Description: `Discount on extras (${stripePayment.percentOff}% off)`
+    });
   }
   
   // Calculate due date (NET 30)
@@ -380,55 +405,35 @@ async function handlePartialPayment(accessToken, realmId, customer, booking, str
   dueDate.setDate(dueDate.getDate() + 30);
   
   const invoiceData = {
-    CustomerRef: { value: customer.Id },
-    Line: lines,
+    CustomerRef: { value: String(customer.Id) },
+    BillEmail: { Address: booking.email },
+    Line: invoiceLines,
     DueDate: dueDate.toISOString().split('T')[0],
-    CustomerMemo: { value: 'Thank you for your booking! This invoice reflects the balance due for additional team members.' },
-    PrivateNote: `YCBM Booking: ${booking.bookingRef} | Stripe payment: $${amountPaid.toFixed(2)}`
+    PrivateNote: `YCBM Booking: ${booking.bookingRef} | Balance for additional team members`
   };
   
-  const invoice = await createInvoice(accessToken, realmId, invoiceData);
-  console.log(`   ✓ Invoice created: #${invoice.DocNumber} (Total: $${invoice.TotalAmt})`);
-  
-  // Apply payment for the Stripe amount
-  const paymentData = {
-    CustomerRef: { value: customer.Id },
-    TotalAmt: amountPaid,
-    Line: [{
-      Amount: amountPaid,
-      LinkedTxn: [{
-        TxnId: invoice.Id,
-        TxnType: 'Invoice'
-      }]
-    }],
-    PrivateNote: `Stripe payment for YCBM booking: ${booking.bookingRef}`
-  };
-  
-  const payment = await createPayment(accessToken, realmId, paymentData);
-  console.log(`   ✓ Payment applied: $${amountPaid.toFixed(2)}`);
-  
-  const balanceDue = invoice.TotalAmt - amountPaid;
-  console.log(`   📊 Balance due: $${balanceDue.toFixed(2)}`);
+  const invoice = await createInvoice(qb, invoiceData);
+  console.log(`   ✓ Invoice created: #${invoice.DocNumber} ($${extrasBalance.toFixed(2)})`);
   
   // Send invoice for balance due
   let invoiceSent = false;
-  if (balanceDue > 0) {
-    try {
-      await sendInvoice(accessToken, realmId, invoice.Id, booking.email);
+  try {
+    const sendResult = await sendInvoice(qb, invoice.Id, booking.email);
+    if (sendResult) {
       invoiceSent = true;
       console.log(`   ✓ Invoice sent to ${booking.email}`);
-    } catch (e) {
-      console.log(`   ⚠️ Could not send invoice: ${e.message}`);
     }
+  } catch (e) {
+    console.log(`   ⚠️ Could not send invoice: ${e.message}`);
   }
   
   return {
-    type: 'Invoice+Payment',
-    docNumber: invoice.DocNumber,
-    invoiceId: invoice.Id,
+    type: 'SalesReceipt+Invoice',
+    receiptDocNumber: receipt.DocNumber,
+    receiptTotal: receipt.TotalAmt,
+    invoiceDocNumber: invoice.DocNumber,
     invoiceTotal: invoice.TotalAmt,
-    paymentAmount: amountPaid,
-    balanceDue: balanceDue,
+    balanceDue: extrasBalance,
     invoiceSent
   };
 }

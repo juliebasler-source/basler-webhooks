@@ -1,9 +1,14 @@
 /**
  * YCBM → QuickBooks Integration
  * 
- * @version 2.0.1
+ * @version 2.1.0
  * @description Handle YouCanBookMe webhooks and create QuickBooks records
  * @lastUpdated 2025-01-02
+ * 
+ * CHANGELOG v2.1.0:
+ * - Fixed PARTIAL_PAYMENT: creates ONE Invoice + applies Payment (not two records)
+ * - Added dynamic QB price lookup via getItemPrice()
+ * - Fixed customer creation to pass firstName/lastName/phone
  * 
  * CHANGELOG v2.0.1:
  * - Fixed ES module syntax (import instead of require)
@@ -25,7 +30,9 @@ import {
   findOrCreateCustomer, 
   createSalesReceipt,
   createInvoice,
-  sendInvoice
+  createPayment,
+  sendInvoice,
+  getItemPrice
 } from '../lib/quickbooks.js';
 
 // Default prices (used for paylater when no Stripe data)
@@ -62,17 +69,21 @@ export default async function handler(req, res) {
     // Get QuickBooks client
     const qb = await getQBClient();
     
+    // Fetch prices from QuickBooks (falls back to defaults if lookup fails)
+    console.log(`\n💰 Fetching QB Prices...`);
+    const bstPrice = await getItemPrice(qb, process.env.QB_ITEM_BST || '21');
+    const addPrice = await getItemPrice(qb, process.env.QB_ITEM_ADD || '22');
+    console.log(`   Base (BST): $${bstPrice}`);
+    console.log(`   Additional: $${addPrice}`);
+    
     // Find or create customer in QuickBooks
     const customer = await findOrCreateCustomer(qb, {
-      displayName: booking.fullName,
-      email: booking.email
+      firstName: booking.firstName,
+      lastName: booking.lastName,
+      email: booking.email,
+      phone: booking.phone
     });
     console.log(`\n✓ QB Customer: ${customer.DisplayName} (ID: ${customer.Id})`);
-    
-    // Use default prices (or could fetch from QB if needed)
-    const bstPrice = DEFAULT_BST_PRICE;
-    const addPrice = DEFAULT_ADD_PRICE;
-    console.log(`\n💰 Prices: Base=$${bstPrice}, Additional=$${addPrice}`);
     
     // Search Stripe for payment (extended to 60 min for testing)
     const stripePayment = await findPaymentByEmail(booking.email, 60);
@@ -113,11 +124,9 @@ export default async function handler(req, res) {
     
     console.log(`\n${'═'.repeat(60)}`);
     console.log(`✅ SUCCESS - ${flow}`);
-    if (result.docNumber) {
-      console.log(`   QB Record: ${result.type} #${result.docNumber}`);
-    } else if (result.receiptDocNumber) {
-      console.log(`   QB Records: Receipt #${result.receiptDocNumber} + Invoice #${result.invoiceDocNumber}`);
-    }
+    console.log(`   QB Record: ${result.type} #${result.docNumber}`);
+    if (result.paymentAmount) console.log(`   Payment Applied: $${result.paymentAmount.toFixed(2)}`);
+    if (result.balanceDue) console.log(`   Balance Due: $${result.balanceDue.toFixed(2)}`);
     if (result.invoiceSent) console.log(`   📧 Invoice sent to customer`);
     console.log('═'.repeat(60));
     
@@ -309,12 +318,22 @@ async function handlePaidWithDiscount(qb, customer, booking, stripePayment) {
 
 /**
  * Flow 4: PARTIAL_PAYMENT - Stripe payment + extras (balance due)
- * Create Sales Receipt for Stripe payment, Invoice for extras balance
+ * Creates ONE invoice showing everything, then applies Stripe payment
+ * 
+ * Invoice shows:
+ *   Building Strong Teams      $1,750.00
+ *   Additional Team Members      $99.00 (x qty)
+ *   Discount                  -$XXX.XX
+ *   ─────────────────────────────────────
+ *   Total                     $XXX.XX
+ *   Payment (Stripe)          -$XX.XX
+ *   ─────────────────────────────────────
+ *   Balance Due               $XX.XX
  */
 async function handlePartialPayment(qb, customer, booking, stripePayment, bstPrice, addPrice) {
-  console.log('\n📋 Creating Sales Receipt + Invoice (partial payment)...');
+  console.log('\n📋 Creating Invoice + Payment (partial)...');
   
-  // Calculate amounts
+  // Calculate amounts from Stripe
   const subtotal = centsToDollars(stripePayment.subtotal);
   const discountAmount = centsToDollars(stripePayment.discountAmount);
   const amountPaid = centsToDollars(stripePayment.amountPaid);
@@ -330,25 +349,38 @@ async function handlePartialPayment(qb, customer, booking, stripePayment, bstPri
     extrasDiscount = Math.round(extrasDiscount * 100) / 100; // Round to cents
   }
   
-  const extrasBalance = extrasTotal - extrasDiscount;
+  // Build ALL line items for the invoice
+  const invoiceLines = [];
   
-  // ===== Part 1: Sales Receipt for Stripe payment =====
-  const receiptLines = [
-    {
-      Amount: subtotal,
+  // Line 1: Building Strong Teams (at subtotal/pre-discount price)
+  invoiceLines.push({
+    Amount: subtotal,
+    DetailType: 'SalesItemLineDetail',
+    SalesItemLineDetail: {
+      ItemRef: { value: String(process.env.QB_ITEM_BST) },
+      Qty: 1,
+      UnitPrice: subtotal
+    },
+    Description: 'Building Strong Teams'
+  });
+  
+  // Line 2: Additional Team Members
+  if (booking.additionalTeamMembers > 0) {
+    invoiceLines.push({
+      Amount: extrasTotal,
       DetailType: 'SalesItemLineDetail',
       SalesItemLineDetail: {
-        ItemRef: { value: String(process.env.QB_ITEM_BST) },
-        Qty: 1,
-        UnitPrice: subtotal
+        ItemRef: { value: String(process.env.QB_ITEM_ADD) },
+        Qty: booking.additionalTeamMembers,
+        UnitPrice: addPrice
       },
-      Description: 'Building Strong Teams'
-    }
-  ];
+      Description: `Additional Team Members (${booking.additionalTeamMembers})`
+    });
+  }
   
-  // Add discount line if applicable
+  // Line 3: Discount on base (from Stripe)
   if (discountAmount > 0) {
-    receiptLines.push({
+    invoiceLines.push({
       Amount: -discountAmount,
       DetailType: 'SalesItemLineDetail',
       SalesItemLineDetail: {
@@ -360,33 +392,7 @@ async function handlePartialPayment(qb, customer, booking, stripePayment, bstPri
     });
   }
   
-  const receiptData = {
-    CustomerRef: { value: String(customer.Id) },
-    BillEmail: { Address: booking.email },
-    Line: receiptLines,
-    PrivateNote: `YCBM Booking: ${booking.bookingRef} | Stripe payment for base`,
-    PaymentMethodRef: { value: '1' },
-    DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT || '154' }
-  };
-  
-  const receipt = await createSalesReceipt(qb, receiptData);
-  console.log(`   ✓ Sales Receipt created: #${receipt.DocNumber} ($${amountPaid.toFixed(2)})`);
-  
-  // ===== Part 2: Invoice for extras balance =====
-  const invoiceLines = [
-    {
-      Amount: extrasTotal,
-      DetailType: 'SalesItemLineDetail',
-      SalesItemLineDetail: {
-        ItemRef: { value: String(process.env.QB_ITEM_ADD) },
-        Qty: booking.additionalTeamMembers,
-        UnitPrice: addPrice
-      },
-      Description: `Additional Team Members (${booking.additionalTeamMembers})`
-    }
-  ];
-  
-  // Add extras discount line if percentage discount
+  // Line 4: Discount on extras (if percentage discount)
   if (extrasDiscount > 0) {
     invoiceLines.push({
       Amount: -extrasDiscount,
@@ -400,40 +406,73 @@ async function handlePartialPayment(qb, customer, booking, stripePayment, bstPri
     });
   }
   
+  // Calculate expected total
+  const expectedTotal = subtotal + extrasTotal - discountAmount - extrasDiscount;
+  const balanceDue = expectedTotal - amountPaid;
+  
+  console.log(`   📊 Invoice breakdown:`);
+  console.log(`      Base: $${subtotal.toFixed(2)}`);
+  console.log(`      Extras: $${extrasTotal.toFixed(2)} (${booking.additionalTeamMembers} members)`);
+  console.log(`      Discount: -$${(discountAmount + extrasDiscount).toFixed(2)}`);
+  console.log(`      Invoice Total: $${expectedTotal.toFixed(2)}`);
+  console.log(`      Stripe Payment: -$${amountPaid.toFixed(2)}`);
+  console.log(`      Balance Due: $${balanceDue.toFixed(2)}`);
+  
   // Calculate due date (NET 30)
   const dueDate = new Date();
   dueDate.setDate(dueDate.getDate() + 30);
   
+  // Create the invoice
   const invoiceData = {
     CustomerRef: { value: String(customer.Id) },
     BillEmail: { Address: booking.email },
     Line: invoiceLines,
     DueDate: dueDate.toISOString().split('T')[0],
-    PrivateNote: `YCBM Booking: ${booking.bookingRef} | Balance for additional team members`
+    PrivateNote: `YCBM Booking: ${booking.bookingRef} | Stripe payment: $${amountPaid.toFixed(2)}`
   };
   
   const invoice = await createInvoice(qb, invoiceData);
-  console.log(`   ✓ Invoice created: #${invoice.DocNumber} ($${extrasBalance.toFixed(2)})`);
+  console.log(`   ✓ Invoice created: #${invoice.DocNumber} (Total: $${invoice.TotalAmt})`);
   
-  // Send invoice for balance due
+  // Apply the Stripe payment against the invoice
+  const paymentData = {
+    CustomerRef: { value: String(customer.Id) },
+    TotalAmt: amountPaid,
+    Line: [{
+      Amount: amountPaid,
+      LinkedTxn: [{
+        TxnId: String(invoice.Id),
+        TxnType: 'Invoice'
+      }]
+    }],
+    PrivateNote: `Stripe payment for YCBM booking: ${booking.bookingRef}`
+  };
+  
+  const payment = await createPayment(qb, paymentData);
+  console.log(`   ✓ Payment applied: $${amountPaid.toFixed(2)} (Payment ID: ${payment.Id})`);
+  
+  // Send invoice showing balance due
   let invoiceSent = false;
-  try {
-    const sendResult = await sendInvoice(qb, invoice.Id, booking.email);
-    if (sendResult) {
-      invoiceSent = true;
-      console.log(`   ✓ Invoice sent to ${booking.email}`);
+  if (balanceDue > 0) {
+    try {
+      const sendResult = await sendInvoice(qb, invoice.Id, booking.email);
+      if (sendResult) {
+        invoiceSent = true;
+        console.log(`   ✓ Invoice sent to ${booking.email} (Balance: $${balanceDue.toFixed(2)})`);
+      }
+    } catch (e) {
+      console.log(`   ⚠️ Could not send invoice: ${e.message}`);
     }
-  } catch (e) {
-    console.log(`   ⚠️ Could not send invoice: ${e.message}`);
   }
   
   return {
-    type: 'SalesReceipt+Invoice',
-    receiptDocNumber: receipt.DocNumber,
-    receiptTotal: receipt.TotalAmt,
-    invoiceDocNumber: invoice.DocNumber,
+    type: 'Invoice+Payment',
+    docNumber: invoice.DocNumber,
+    invoiceId: invoice.Id,
     invoiceTotal: invoice.TotalAmt,
-    balanceDue: extrasBalance,
+    paymentId: payment.Id,
+    paymentAmount: amountPaid,
+    balanceDue: balanceDue,
     invoiceSent
   };
 }

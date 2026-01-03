@@ -116,6 +116,19 @@ export default async function handler(req, res) {
       console.log(`\n--- ${link.name} (${link.code}) ---`);
       console.log(`    Activity total: ${link.total}`);
 
+      // Skip test and marketing links
+      const linkNameLower = link.name.toLowerCase();
+      if (linkNameLower.includes('test') || linkNameLower.includes('marketing')) {
+        console.log(`    ⏭️ Test/Marketing link - SKIP`);
+        results.skipped.push({
+          link: link.code,
+          name: link.name,
+          reason: 'Test/Marketing link',
+          total: link.total
+        });
+        continue;
+      }
+
       try {
         // Get link details
         const linkDetails = await getLinkDetails(link.code);

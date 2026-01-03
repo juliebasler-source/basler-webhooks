@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/ids-monthly-invoice?mode=dry-run",
+      "schedule": "0 8 2 * *"
+    }
+  ]
+}

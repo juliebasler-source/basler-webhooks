@@ -7,9 +7,10 @@
     "dev": "vercel dev",
     "deploy": "vercel --prod"
   },
-  "dependencies": {
+"dependencies": {
     "@vercel/kv": "^3.0.0",
     "node-quickbooks": "^2.0.39",
+    "nodemailer": "^6.9.8",
     "stripe": "^14.0.0"
   },
   "devDependencies": {

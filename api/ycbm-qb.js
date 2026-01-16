@@ -55,7 +55,7 @@ const DEFAULT_BST_PRICE = 1750;
 const DEFAULT_ADD_PRICE = 99;
 
 // Invoice payment terms (days until due)
-const NET_TERMS_DAYS = 10;  // Change this number to adjust invoice due date
+const NET_TERMS_DAYS = 7;  // Change this number to adjust invoice due date
 
 export default async function handler(req, res) {
   // Only accept POST

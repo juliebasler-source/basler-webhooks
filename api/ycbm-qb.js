@@ -1,9 +1,14 @@
 /**
  * YCBM → QuickBooks Integration
  * 
- * @version 2.1.1
+ * @version 2.2.0
  * @description Handle YouCanBookMe webhooks and create QuickBooks records
- * @lastUpdated 2025-01-02
+ * @lastUpdated 2025-01-15
+ * 
+ * CHANGELOG v2.2.0:
+ * - Added Phase 1/Phase 2 detection
+ * - Only processes Phase 1 bookings for QuickBooks
+ * - Phase 2 bookings are acknowledged but skipped (already paid in Phase 1)
  * 
  * CHANGELOG v2.1.1:
  * - Fixed DocNumber undefined in logs (fallback to Invoice ID)
@@ -67,7 +72,50 @@ export default async function handler(req, res) {
     console.log(`\n👤 Customer: ${booking.fullName}`);
     console.log(`📧 Email: ${booking.email}`);
     console.log(`📋 Booking Ref: ${booking.bookingRef}`);
+    console.log(`📅 Appointment Type: ${booking.appointmentType || 'Unknown'}`);
     console.log(`👥 Additional Team Members: ${booking.additionalTeamMembers}`);
+    
+    // ========================================
+    // PHASE DETECTION - Only process Phase 1
+    // ========================================
+    const appointmentType = (booking.appointmentType || '').toLowerCase();
+    
+    // Phase 2 identifiers
+    const isPhase2 = appointmentType.includes('phase 2') || 
+                     appointmentType.includes('90 minute') ||
+                     appointmentType.includes('team building');
+    
+    // Phase 1 identifiers
+    const isPhase1 = appointmentType.includes('phase 1') || 
+                     appointmentType.includes('60 minute') ||
+                     appointmentType.includes('leader only');
+    
+    if (isPhase2) {
+      console.log('\n⏭️  PHASE 2 BOOKING DETECTED');
+      console.log('   → Skipping QuickBooks processing (already paid in Phase 1)');
+      console.log('   → Booking acknowledged successfully');
+      console.log('═'.repeat(60));
+      
+      return res.status(200).json({
+        status: 'success',
+        phase: 'Phase 2',
+        message: 'Phase 2 booking acknowledged - no QB processing needed (already paid)',
+        bookingRef: booking.bookingRef,
+        customer: booking.fullName
+      });
+    }
+    
+    if (!isPhase1) {
+      console.log('\n⚠️  WARNING: Could not detect appointment phase');
+      console.log('   → Processing as Phase 1 by default');
+      console.log('   → If this is Phase 2, update appointment type to include "Phase 2" or "90 Minute"');
+    } else {
+      console.log('\n✓ PHASE 1 BOOKING CONFIRMED - Processing QuickBooks record...');
+    }
+    
+    // ========================================
+    // Continue with QB processing (Phase 1 only)
+    // ========================================
     
     // Get QuickBooks client
     const qb = await getQBClient();
@@ -127,6 +175,7 @@ export default async function handler(req, res) {
     
     console.log(`\n${'═'.repeat(60)}`);
     console.log(`✅ SUCCESS - ${flow}`);
+    console.log(`   Phase: Phase 1`);
     console.log(`   QB Record: ${result.type} #${result.docNumber}`);
     if (result.paymentAmount) console.log(`   Payment Applied: $${result.paymentAmount.toFixed(2)}`);
     if (result.balanceDue) console.log(`   Balance Due: $${result.balanceDue.toFixed(2)}`);
@@ -135,6 +184,7 @@ export default async function handler(req, res) {
     
     return res.status(200).json({
       status: 'success',
+      phase: 'Phase 1',
       flow: flow,
       ...result
     });
@@ -195,7 +245,7 @@ async function handlePaylater(qb, customer, booking, bstPrice, addPrice) {
     BillEmail: { Address: booking.email },
     Line: lines,
     DueDate: dueDate.toISOString().split('T')[0],
-    PrivateNote: `YCBM Booking: ${booking.bookingRef}`
+    PrivateNote: `YCBM Booking: ${booking.bookingRef} | Phase 1`
   };
   
   const invoice = await createInvoice(qb, invoiceData);
@@ -247,7 +297,7 @@ async function handleSimplePaid(qb, customer, booking, stripePayment) {
     CustomerRef: { value: String(customer.Id) },
     BillEmail: { Address: booking.email },
     Line: lines,
-    PrivateNote: `YCBM Booking: ${booking.bookingRef}`,
+    PrivateNote: `YCBM Booking: ${booking.bookingRef} | Phase 1`,
     PaymentMethodRef: { value: '1' },
     DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT || '154' }
   };
@@ -303,7 +353,7 @@ async function handlePaidWithDiscount(qb, customer, booking, stripePayment) {
     CustomerRef: { value: String(customer.Id) },
     BillEmail: { Address: booking.email },
     Line: lines,
-    PrivateNote: `YCBM Booking: ${booking.bookingRef} | Coupon: ${couponCode}`,
+    PrivateNote: `YCBM Booking: ${booking.bookingRef} | Phase 1 | Coupon: ${couponCode}`,
     PaymentMethodRef: { value: '1' },
     DepositToAccountRef: { value: process.env.QB_DEPOSIT_ACCOUNT || '154' }
   };
@@ -434,7 +484,7 @@ async function handlePartialPayment(qb, customer, booking, stripePayment, bstPri
     BillEmail: { Address: booking.email },
     Line: invoiceLines,
     DueDate: dueDate.toISOString().split('T')[0],
-    PrivateNote: `YCBM Booking: ${booking.bookingRef} | Stripe payment: $${amountPaid.toFixed(2)}`
+    PrivateNote: `YCBM Booking: ${booking.bookingRef} | Phase 1 | Stripe payment: $${amountPaid.toFixed(2)}`
   };
   
   const invoice = await createInvoice(qb, invoiceData);
@@ -452,7 +502,7 @@ async function handlePartialPayment(qb, customer, booking, stripePayment, bstPri
         TxnType: 'Invoice'
       }]
     }],
-    PrivateNote: `Stripe payment for YCBM booking: ${booking.bookingRef}`
+    PrivateNote: `Stripe payment for YCBM booking: ${booking.bookingRef} | Phase 1`
   };
   
   const payment = await createPayment(qb, paymentData);

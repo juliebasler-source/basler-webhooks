@@ -1,9 +1,13 @@
 /**
  * YCBM → QuickBooks Integration
  * 
- * @version 2.2.0
+ * @version 2.2.1
  * @description Handle YouCanBookMe webhooks and create QuickBooks records
- * @lastUpdated 2025-01-15
+ * @lastUpdated 2025-01-16
+ * 
+ * CHANGELOG v2.2.1:
+ * - Changed default NET terms from 30 days to 10 days
+ * - Added NET_TERMS_DAYS configuration variable for easy adjustment
  * 
  * CHANGELOG v2.2.0:
  * - Added Phase 1/Phase 2 detection
@@ -43,9 +47,15 @@ import {
   getItemPrice
 } from '../lib/quickbooks.js';
 
+// ========================================
+// CONFIGURATION
+// ========================================
 // Default prices (used for paylater when no Stripe data)
 const DEFAULT_BST_PRICE = 1750;
 const DEFAULT_ADD_PRICE = 99;
+
+// Invoice payment terms (days until due)
+const NET_TERMS_DAYS = 10;  // Change this number to adjust invoice due date
 
 export default async function handler(req, res) {
   // Only accept POST
@@ -236,9 +246,9 @@ async function handlePaylater(qb, customer, booking, bstPrice, addPrice) {
     });
   }
   
-  // Calculate due date (NET 30)
+  // Calculate due date (NET 10)
   const dueDate = new Date();
-  dueDate.setDate(dueDate.getDate() + 30);
+  dueDate.setDate(dueDate.getDate() + NET_TERMS_DAYS);
   
   const invoiceData = {
     CustomerRef: { value: String(customer.Id) },
@@ -474,9 +484,9 @@ async function handlePartialPayment(qb, customer, booking, stripePayment, bstPri
   console.log(`      Stripe Payment: -$${amountPaid.toFixed(2)}`);
   console.log(`      Balance Due: $${balanceDue.toFixed(2)}`);
   
-  // Calculate due date (NET 30)
+  // Calculate due date (NET 10)
   const dueDate = new Date();
-  dueDate.setDate(dueDate.getDate() + 30);
+  dueDate.setDate(dueDate.getDate() + NET_TERMS_DAYS);
   
   // Create the invoice
   const invoiceData = {

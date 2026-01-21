@@ -41,6 +41,9 @@ const CONFIG = {
   QB_ITEM_INTERVIEW: process.env.QB_ITEM_INTERVIEW || '24',
 };
 
+// Invoice payment terms (days until due)
+const NET_TERMS_DAYS = 10;  // Change this number to adjust invoice due date
+
 // ============================================================================
 // MAIN HANDLER
 // ============================================================================
@@ -300,12 +303,16 @@ export default async function handler(req, res) {
           // Build memo with link names
           const memo = `Assessment usage for ${targetMonth}: ${data.linkNames.join(', ')}`;
 
+          // Calculate due date (NET 7)
+          const dueDate = new Date();
+          dueDate.setDate(dueDate.getDate() + NET_TERMS_DAYS);
+
           // Create invoice
           const invoice = await createInvoice(qb, {
             customerId: customer.Id,
             lineItems,
             memo,
-            dueDate: calculateDueDate(30)
+            dueDate: dueDate.toISOString().split('T')[0]
           });
 
           console.log(`   ✅ Invoice #${invoice.DocNumber} created - $${invoice.TotalAmt}`);
@@ -473,13 +480,4 @@ function groupByLeader(processedLinks) {
   }
 
   return grouped;
-}
-
-/**
- * Calculate due date N days from now
- */
-function calculateDueDate(days) {
-  const date = new Date();
-  date.setDate(date.getDate() + days);
-  return date.toISOString().split('T')[0];
 }

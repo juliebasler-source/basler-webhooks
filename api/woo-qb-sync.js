@@ -43,7 +43,7 @@ import {
   getQBClient, 
   findOrCreateCustomer, 
   createSalesReceipt, 
-  createInvoice, 
+  createInvoiceRaw, 
   sendInvoice 
 } from '../lib/quickbooks.js';
 import { logFailedWebhook } from '../lib/failed-webhooks.js';
@@ -149,7 +149,7 @@ export default async function handler(req, res) {
       
       // Build invoice data (paylater = full price, no discount shown)
       const invoiceData = buildInvoiceData(qbCustomer, order);
-      const invoice = await createInvoice(qb, invoiceData);
+      const invoice = await createInvoiceRaw(qb, invoiceData);
       
       console.log(`   Invoice ID: ${invoice.Id}`);
       console.log(`   Invoice Number: ${invoice.DocNumber || 'auto-assigned'}`);

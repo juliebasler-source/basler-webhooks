@@ -41,7 +41,7 @@ import {
   getQBClient, 
   findOrCreateCustomer, 
   createSalesReceipt,
-  createInvoice,
+  createInvoiceRaw,
   createPayment,
   sendInvoice,
   getItemPrice
@@ -258,7 +258,7 @@ async function handlePaylater(qb, customer, booking, bstPrice, addPrice) {
     PrivateNote: `YCBM Booking: ${booking.bookingRef} | Phase 1`
   };
   
-  const invoice = await createInvoice(qb, invoiceData);
+  const invoice = await createInvoiceRaw(qb, invoiceData);
   const docNum = invoice.DocNumber || `ID:${invoice.Id}`;
   console.log(`   ✓ Invoice created: #${docNum}`);
   
@@ -497,7 +497,7 @@ async function handlePartialPayment(qb, customer, booking, stripePayment, bstPri
     PrivateNote: `YCBM Booking: ${booking.bookingRef} | Phase 1 | Stripe payment: $${amountPaid.toFixed(2)}`
   };
   
-  const invoice = await createInvoice(qb, invoiceData);
+  const invoice = await createInvoiceRaw(qb, invoiceData);
   const docNum = invoice.DocNumber || `ID:${invoice.Id}`;
   console.log(`   ✓ Invoice created: #${docNum} (Total: $${invoice.TotalAmt})`);
   

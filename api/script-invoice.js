@@ -9,9 +9,12 @@
  * FLOW:
  * 1. User clicks "Create Interview Link" in Build File menu
  * 2. Apps Script creates IDS assessment link (existing behavior)
- * 3. Apps Script calls THIS endpoint with leader/team data
- * 4. This endpoint creates QB Invoice (NET 7, same as YCBM paylater)
+ * 3. Apps Script calls THIS endpoint with leader data
+ * 4. This endpoint creates QB Invoice (NET 7) using Item 26
  * 5. Invoice is auto-sent to leader's email
+ * 
+ * INVOICE: Single line item — QB Item 26 (Interview Link)
+ * Price is fetched dynamically from QuickBooks.
  * 
  * SECURITY:
  * - Requires shared secret in Authorization header
@@ -33,6 +36,9 @@ import {
 
 // Invoice payment terms (days until due) - matches YCBM paylater
 const NET_TERMS_DAYS = 7;
+
+// QuickBooks Item ID for Interview Guide (from Vercel env var, fallback to 26)
+const QB_ITEM_INTERVIEW_GUIDE = process.env.QB_ITEM_INTERVIEW_GUIDE || '26';
 
 // Shared secret for authenticating requests from Apps Script
 // Set this in Vercel Environment Variables as SCRIPT_INVOICE_SECRET
@@ -74,7 +80,6 @@ export default async function handler(req, res) {
       email,
       phone,
       companyName,
-      additionalTeamMembers,
       source  // optional - for logging (e.g., "Build File: John Smith")
     } = req.body;
 
@@ -93,13 +98,11 @@ export default async function handler(req, res) {
     }
 
     const fullName = `${firstName} ${lastName}`;
-    const extras = parseInt(additionalTeamMembers) || 0;
 
     console.log(`\n👤 Leader: ${fullName}`);
     console.log(`📧 Email: ${email}`);
     if (phone) console.log(`📱 Phone: ${phone}`);
     if (companyName) console.log(`🏢 Company: ${companyName}`);
-    console.log(`👥 Additional Team Members: ${extras}`);
     if (source) console.log(`📋 Source: ${source}`);
 
     // ========================================
@@ -110,12 +113,10 @@ export default async function handler(req, res) {
     console.log('\n🔄 Connecting to QuickBooks...');
     const qb = await getQBClient();
 
-    // Fetch current prices from QuickBooks
-    console.log('💰 Fetching QB Prices...');
-    const bstPrice = await getItemPrice(qb, process.env.QB_ITEM_BST || '21');
-    const addPrice = await getItemPrice(qb, process.env.QB_ITEM_ADD || '22');
-    console.log(`   Base (BST): $${bstPrice}`);
-    console.log(`   Additional: $${addPrice}`);
+    // Fetch current price for Item 26 from QuickBooks
+    console.log('💰 Fetching QB Price for Interview Link (Item ' + QB_ITEM_INTERVIEW_GUIDE + ')...');
+    const itemPrice = await getItemPrice(qb, QB_ITEM_INTERVIEW_GUIDE);
+    console.log(`   Item ${QB_ITEM_INTERVIEW_GUIDE}: $${itemPrice}`);
 
     // Find or create customer
     const customer = await findOrCreateCustomer(qb, {
@@ -127,49 +128,29 @@ export default async function handler(req, res) {
     console.log(`\n✓ QB Customer: ${customer.DisplayName} (ID: ${customer.Id})`);
 
     // ========================================
-    // BUILD INVOICE
+    // BUILD INVOICE (Single line item - Item 26)
     // ========================================
     console.log('\n📋 Creating Invoice...');
     
-    const lines = [];
-
-    // Line 1: Building Strong Teams
-    lines.push({
-      Amount: bstPrice,
-      DetailType: 'SalesItemLineDetail',
-      SalesItemLineDetail: {
-        ItemRef: { value: String(process.env.QB_ITEM_BST || '21') },
-        Qty: 1,
-        UnitPrice: bstPrice
-      },
-      Description: 'Building Strong Teams'
-    });
-
-    // Line 2: Additional Team Members (if any)
-    if (extras > 0) {
-      const extrasTotal = extras * addPrice;
-      lines.push({
-        Amount: extrasTotal,
+    const lines = [
+      {
+        Amount: itemPrice,
         DetailType: 'SalesItemLineDetail',
         SalesItemLineDetail: {
-          ItemRef: { value: String(process.env.QB_ITEM_ADD || '22') },
-          Qty: extras,
-          UnitPrice: addPrice
-        },
-        Description: `Additional Team Members (${extras})`
-      });
-    }
+          ItemRef: { value: QB_ITEM_INTERVIEW_GUIDE },
+          Qty: 1,
+          UnitPrice: itemPrice
+        }
+      }
+    ];
 
     // Calculate due date
     const dueDate = new Date();
     dueDate.setDate(dueDate.getDate() + NET_TERMS_DAYS);
 
-    // Calculate expected total for logging
-    const expectedTotal = bstPrice + (extras * addPrice);
     console.log(`   📊 Invoice breakdown:`);
-    console.log(`      Base: $${bstPrice.toFixed(2)}`);
-    if (extras > 0) console.log(`      Extras: $${(extras * addPrice).toFixed(2)} (${extras} members × $${addPrice})`);
-    console.log(`      Total: $${expectedTotal.toFixed(2)}`);
+    console.log(`      Item ${QB_ITEM_INTERVIEW_GUIDE}: $${itemPrice.toFixed(2)}`);
+    console.log(`      Total: $${itemPrice.toFixed(2)}`);
     console.log(`      Due: ${dueDate.toISOString().split('T')[0]} (NET ${NET_TERMS_DAYS})`);
 
     // Build memo/private note

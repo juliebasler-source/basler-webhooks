@@ -1,14 +1,17 @@
 /**
  * Stripe Live Training → QuickBooks Integration
  *
- * @version 1.0.1
+ * @version 1.0.2
  * @description Handles Stripe checkout.session.completed webhooks for
  *              Basler Academy Live Training Event purchases.
  *              Creates a QuickBooks Sales Receipt for each completed payment.
  *
+ * CHANGELOG v1.0.2:
+ * - Fixed billing address not being saved to QB customer record
+ *   findOrCreateCustomer doesn't accept address, so we update QB separately
+ *
  * CHANGELOG v1.0.1:
  * - Fixed Stripe signature verification by reading raw body from request stream
- *   (Vercel parses JSON body by default which breaks Stripe signature check)
  */
 
 import Stripe from 'stripe';
@@ -30,10 +33,6 @@ const PAYMENT_METHOD_REF = 'Stripe';
 // RAW BODY HELPER
 // ============================================================================
 
-/**
- * Read raw body from request stream
- * Required for Stripe webhook signature verification
- */
 async function getRawBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -44,7 +43,7 @@ async function getRawBody(req) {
 }
 
 // ============================================================================
-// VERCEL CONFIG — disable automatic body parsing so we get the raw stream
+// VERCEL CONFIG — disable automatic body parsing
 // ============================================================================
 
 export const config = {
@@ -52,6 +51,44 @@ export const config = {
     bodyParser: false
   }
 };
+
+// ============================================================================
+// ADDRESS UPDATE HELPER
+// ============================================================================
+
+/**
+ * Update QB customer billing address after find/create
+ * Non-blocking — if it fails the receipt still gets created
+ */
+async function updateCustomerAddress(qb, customerId, address, syncToken) {
+  if (!address || !address.line1) return;
+
+  return new Promise((resolve) => {
+    const updateData = {
+      Id: String(customerId),
+      SyncToken: String(syncToken),
+      sparse: true,
+      BillAddr: {
+        Line1: address.line1 || '',
+        Line2: address.line2 || '',
+        City: address.city || '',
+        CountrySubDivisionCode: address.state || '',
+        PostalCode: address.postal_code || '',
+        Country: address.country || 'US'
+      }
+    };
+
+    qb.updateCustomer(updateData, (err, updated) => {
+      if (err) {
+        console.warn(`   ⚠ Could not update customer address: ${JSON.stringify(err)}`);
+        resolve(null);
+      } else {
+        console.log(`   ✓ Customer address updated`);
+        resolve(updated);
+      }
+    });
+  });
+}
 
 // ============================================================================
 // MAIN HANDLER
@@ -134,6 +171,8 @@ export default async function handler(req, res) {
   console.log(`   Name:    ${firstName} ${lastName}`);
   console.log(`   Email:   ${email}`);
   console.log(`   Phone:   ${phone || '(none)'}`);
+  console.log(`   City:    ${address.city || '(none)'}`);
+  console.log(`   State:   ${address.state || '(none)'}`);
   console.log(`   Amount:  $${amountPaid}`);
 
   if (!email) {
@@ -166,20 +205,23 @@ export default async function handler(req, res) {
       firstName,
       lastName,
       email,
-      phone,
-      billingAddress: address.line1 ? {
-        Line1: address.line1,
-        Line2: address.line2 || '',
-        City: address.city || '',
-        CountrySubDivisionCode: address.state || '',
-        PostalCode: address.postal_code || '',
-        Country: address.country || ''
-      } : undefined
+      phone
     });
     console.log(`   ✓ QB Customer: ${qbCustomer.DisplayName} (ID: ${qbCustomer.Id})`);
   } catch (err) {
     console.error('❌ Failed to find/create QB customer:', err.message);
     return res.status(500).json({ error: 'QB customer lookup failed', message: err.message });
+  }
+
+  // ==========================================================================
+  // Step 5b: Update customer address (non-blocking)
+  // ==========================================================================
+
+  if (address.line1) {
+    console.log(`\n📍 UPDATING CUSTOMER ADDRESS...`);
+    await updateCustomerAddress(qb, qbCustomer.Id, address, qbCustomer.SyncToken);
+  } else {
+    console.log(`\n📍 No address provided by Stripe — skipping address update`);
   }
 
   // ==========================================================================

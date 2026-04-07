@@ -1,33 +1,14 @@
 /**
  * Stripe Live Training → QuickBooks Integration
  *
- * @version 1.0.0
+ * @version 1.0.1
  * @description Handles Stripe checkout.session.completed webhooks for
  *              Basler Academy Live Training Event purchases.
  *              Creates a QuickBooks Sales Receipt for each completed payment.
  *
- * FLOW:
- *   Stripe Payment Link purchased
- *     → Stripe fires checkout.session.completed webhook
- *     → Verify Stripe webhook signature
- *     → Extract customer data (name, email, address, phone, amount)
- *     → Find or create QB customer (lookup by email)
- *     → Fetch live price from QB item (QB_ITEM_LIVE_TRAINING)
- *     → Create QB Sales Receipt
- *     → Return 200
- *
- * ENVIRONMENT VARIABLES:
- *   STRIPE_LIVE_TRAINING_WEBHOOK_SECRET  - Stripe webhook signing secret (whsec_...)
- *   QB_ITEM_LIVE_TRAINING                - QB Item ID for live training product (e.g. "5")
- *   STRIPE_SECRET_KEY                    - Existing Stripe secret key (already set)
- *   QB_CLIENT_ID, QB_CLIENT_SECRET,
- *   QB_REFRESH_TOKEN, QB_REALM_ID,
- *   QB_ENVIRONMENT                       - Existing QB vars (already set)
- *
- * TO GO LIVE:
- *   1. Create webhook in Stripe LIVE mode pointing to this same URL
- *   2. Update STRIPE_LIVE_TRAINING_WEBHOOK_SECRET in Vercel with the live whsec_
- *   3. No code changes needed
+ * CHANGELOG v1.0.1:
+ * - Fixed Stripe signature verification by reading raw body from request stream
+ *   (Vercel parses JSON body by default which breaks Stripe signature check)
  */
 
 import Stripe from 'stripe';
@@ -42,18 +23,41 @@ import {
 // CONFIGURATION
 // ============================================================================
 
-// Fallback price if QB item lookup fails
 const FALLBACK_PRICE = 125;
-
-// Payment method reference shown on QB sales receipt
 const PAYMENT_METHOD_REF = 'Stripe';
+
+// ============================================================================
+// RAW BODY HELPER
+// ============================================================================
+
+/**
+ * Read raw body from request stream
+ * Required for Stripe webhook signature verification
+ */
+async function getRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+// ============================================================================
+// VERCEL CONFIG — disable automatic body parsing so we get the raw stream
+// ============================================================================
+
+export const config = {
+  api: {
+    bodyParser: false
+  }
+};
 
 // ============================================================================
 // MAIN HANDLER
 // ============================================================================
 
 export default async function handler(req, res) {
-  // Only accept POST
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -64,7 +68,7 @@ export default async function handler(req, res) {
   console.log('═'.repeat(60));
 
   // ==========================================================================
-  // Step 1: Verify Stripe webhook signature
+  // Step 1: Verify Stripe webhook signature using raw body
   // ==========================================================================
 
   const webhookSecret = process.env.STRIPE_LIVE_TRAINING_WEBHOOK_SECRET;
@@ -78,13 +82,8 @@ export default async function handler(req, res) {
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
   try {
-    // Stripe requires the raw body for signature verification.
-    // Vercel provides req.body as a parsed object, so we re-stringify it.
-    // For production robustness, raw body middleware is ideal but this works
-    // reliably for JSON payloads.
-    const rawBody = JSON.stringify(req.body);
+    const rawBody = await getRawBody(req);
     const signature = req.headers['stripe-signature'];
-
     event = stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
     console.log(`✓ Stripe signature verified`);
     console.log(`   Event type: ${event.type}`);
@@ -105,7 +104,6 @@ export default async function handler(req, res) {
 
   const session = event.data.object;
 
-  // Only process paid sessions
   if (session.payment_status !== 'paid') {
     console.log(`⏭  Ignoring session with payment_status: ${session.payment_status}`);
     return res.status(200).json({ received: true, action: 'ignored', reason: 'Payment not complete' });
@@ -128,22 +126,18 @@ export default async function handler(req, res) {
   const phone    = customerDetails.phone || '';
   const address  = customerDetails.address || {};
 
-  // Split full name into first/last (best effort)
-  const nameParts  = fullName.trim().split(' ');
-  const firstName  = nameParts[0] || 'Unknown';
-  const lastName   = nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'Customer';
-
-  // Amount paid in dollars
+  const nameParts = fullName.trim().split(' ');
+  const firstName = nameParts[0] || 'Unknown';
+  const lastName  = nameParts.length > 1 ? nameParts.slice(1).join(' ') : 'Customer';
   const amountPaid = session.amount_total ? session.amount_total / 100 : null;
 
   console.log(`   Name:    ${firstName} ${lastName}`);
   console.log(`   Email:   ${email}`);
   console.log(`   Phone:   ${phone || '(none)'}`);
-  console.log(`   Address: ${address.city || ''} ${address.state || ''} ${address.country || ''}`);
   console.log(`   Amount:  $${amountPaid}`);
 
   if (!email) {
-    console.error('❌ No email in Stripe session — cannot look up or create QB customer');
+    console.error('❌ No email in Stripe session');
     return res.status(400).json({ error: 'No customer email in Stripe session' });
   }
 
@@ -162,7 +156,7 @@ export default async function handler(req, res) {
   }
 
   // ==========================================================================
-  // Step 5: Find or create QB customer (by email)
+  // Step 5: Find or create QB customer by email
   // ==========================================================================
 
   console.log(`\n👤 LOOKING UP QB CUSTOMER...`);
@@ -173,7 +167,6 @@ export default async function handler(req, res) {
       lastName,
       email,
       phone,
-      // Pass address fields so new customers get full data
       billingAddress: address.line1 ? {
         Line1: address.line1,
         Line2: address.line2 || '',
@@ -201,11 +194,10 @@ export default async function handler(req, res) {
     unitPrice = await getItemPrice(qb, itemId);
     console.log(`   ✓ QB Item ${itemId} price: $${unitPrice}`);
   } catch (err) {
-    console.warn(`   ⚠ Could not fetch QB item price, using amount from Stripe: $${amountPaid}`);
+    console.warn(`   ⚠ Could not fetch QB item price, using Stripe amount`);
     unitPrice = amountPaid || FALLBACK_PRICE;
   }
 
-  // Use Stripe amount if available (most accurate), fall back to QB item price
   const receiptAmount = amountPaid || unitPrice;
 
   // ==========================================================================
@@ -214,9 +206,7 @@ export default async function handler(req, res) {
 
   console.log(`\n🧾 CREATING QB SALES RECEIPT...`);
   console.log(`   Customer:  ${qbCustomer.DisplayName}`);
-  console.log(`   Item ID:   ${itemId}`);
   console.log(`   Amount:    $${receiptAmount}`);
-  console.log(`   Stripe ID: ${session.id}`);
 
   const receiptData = {
     CustomerRef: {
@@ -239,7 +229,7 @@ export default async function handler(req, res) {
         }
       }
     ],
-    PrivateNote: `Stripe Session: ${session.id} | Payment Link purchase | ${new Date().toISOString()}`
+    PrivateNote: `Stripe Session: ${session.id} | ${new Date().toISOString()}`
   };
 
   let receipt;
@@ -265,10 +255,7 @@ export default async function handler(req, res) {
     received: true,
     action: 'sales_receipt_created',
     stripeSession: session.id,
-    customer: {
-      name: `${firstName} ${lastName}`,
-      email
-    },
+    customer: { name: `${firstName} ${lastName}`, email },
     quickbooks: {
       customerId: qbCustomer.Id,
       receiptId: receipt.Id,

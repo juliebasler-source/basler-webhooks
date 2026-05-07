@@ -16,7 +16,7 @@
  *   - QB_ITEM_INTERVIEW: QB Item ID for Interview Assessment
  */
 
-import { getQBClient, findOrCreateCustomer, createInvoice } from '../lib/quickbooks.js';
+import { getQBClient, findOrCreateCustomer, createInvoice, sendInvoice } from '../lib/quickbooks.js';
 import { 
   getAccountActivityReport, 
   getLinkDetails, 
@@ -42,7 +42,7 @@ const CONFIG = {
 };
 
 // Invoice payment terms (days until due)
-const NET_TERMS_DAYS = 10;  // Change this number to adjust invoice due date
+const NET_TERMS_DAYS = 15;  // Change this number to adjust invoice due date
 
 // ============================================================================
 // MAIN HANDLER
@@ -312,17 +312,33 @@ export default async function handler(req, res) {
             customerId: customer.Id,
             lineItems,
             memo,
-            dueDate: dueDate.toISOString().split('T')[0]
+            dueDate: dueDate.toISOString().split('T')[0],
+            email
           });
 
-          console.log(`   ✅ Invoice #${invoice.DocNumber} created - $${invoice.TotalAmt}`);
-          
+          console.log(`   ✅ Invoice #${invoice.DocNumber || '(no number)'} created - $${invoice.TotalAmt}`);
+
+          // Email the invoice to the leader (non-fatal if it fails)
+          let sent = false;
+          try {
+            const sendResult = await sendInvoice(qb, invoice.Id, email);
+            sent = !!sendResult;
+            if (sent) {
+              console.log(`   📧 Invoice emailed to ${email}`);
+            } else {
+              console.warn(`   ⚠️  Invoice created but email send failed - send manually from QB`);
+            }
+          } catch (sendError) {
+            console.warn(`   ⚠️  Invoice send error (non-fatal): ${sendError.message}`);
+          }
+
           invoiceResults.push({
             email,
             name: data.displayName,
             invoiceId: invoice.Id,
             invoiceNumber: invoice.DocNumber,
             total: invoice.TotalAmt,
+            sent,
             status: 'created'
           });
 
